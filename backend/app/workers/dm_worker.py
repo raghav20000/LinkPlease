@@ -6,7 +6,8 @@ That split is what keeps /webhook fast under a 500-event burst.
 
 Job lifecycle (status field on a dm_jobs document):
 
-    queued -> sending -> in_flight -> delivered   (happy path)
+    queued -> sending -> delivered            (immediate-delivery path)
+                       -> in_flight -> delivered  (accepted, then polled)
                        -> queued (retry, 429/500, attempts < max)
                        -> failed (400, or retries exhausted)
     in_flight -> delivered / failed  (via reconciliation poll)
@@ -22,7 +23,6 @@ job exist at all".
 """
 import asyncio
 import random
-import time
 from datetime import datetime, timedelta, timezone
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -58,11 +58,14 @@ async def _claim_one_in_flight(db: AsyncIOMotorDatabase) -> dict | None:
 
 
 async def _process_send(db: AsyncIOMotorDatabase, job: dict, client: PseudoGramClient) -> None:
-    settings = get_settings()
     now = datetime.now(timezone.utc)
     job_id = str(job["_id"])
     attempts = job.get("attempts", 0)
 
+    # Comment-deletion handling (Part C): if a comment.deleted tombstone
+    # exists for this comment and we have not yet sent anything, we
+    # choose NOT to send. Rationale: the commenter retracted the action
+    # that triggered the DM. Documented as a judgment call in FAILURES.md.
     comment = await db.comments.find_one({"comment_id": job["comment_id"]})
     if comment and comment.get("deleted"):
         await db.dm_jobs.update_one(
@@ -79,12 +82,14 @@ async def _process_send(db: AsyncIOMotorDatabase, job: dict, client: PseudoGramC
             comment_id=job["comment_id"],
             idempotency_key=idempotency_key,
         )
-    except Exception as exc:
-        print(f"DEBUG dm_send_exception={exc}")
+    except Exception as exc:  # network error, timeout, etc -- treat as retryable
         await _retry_or_fail(db, job, attempts, str(exc))
         return
 
     if resp.status_code in (200, 202):
+        # README documents 202/"queued" as the normal response. In
+        # practice the simulator sometimes returns 200/"delivered"
+        # immediately -- see FAILURES.md #2. We handle both shapes.
         body = resp.json()
         dm_id = body.get("dm_id")
         remote_status = body.get("status")
@@ -133,8 +138,9 @@ async def _process_send(db: AsyncIOMotorDatabase, job: dict, client: PseudoGramC
         )
         return
 
-    print(f"DEBUG dm_send_failed status={resp.status_code} body={resp.text[:300]}")
+    # 500 or anything else unexpected -> retryable
     await _retry_or_fail(db, job, attempts, f"http_{resp.status_code}")
+
 
 async def _retry_or_fail(db: AsyncIOMotorDatabase, job: dict, attempts: int, error: str) -> None:
     settings = get_settings()
