@@ -63,10 +63,6 @@ async def _process_send(db: AsyncIOMotorDatabase, job: dict, client: PseudoGramC
     job_id = str(job["_id"])
     attempts = job.get("attempts", 0)
 
-    # Comment-deletion handling (Part C): if a comment.deleted tombstone
-    # exists for this comment and we have not yet sent anything, we
-    # choose NOT to send. Rationale: the commenter retracted the action
-    # that triggered the DM. Documented as a judgment call in FAILURES.md.
     comment = await db.comments.find_one({"comment_id": job["comment_id"]})
     if comment and comment.get("deleted"):
         await db.dm_jobs.update_one(
@@ -83,27 +79,23 @@ async def _process_send(db: AsyncIOMotorDatabase, job: dict, client: PseudoGramC
             comment_id=job["comment_id"],
             idempotency_key=idempotency_key,
         )
-    except Exception as exc:  # network error, timeout, etc -- treat as retryable
+    except Exception as exc:
         print(f"DEBUG dm_send_exception={exc}")
         await _retry_or_fail(db, job, attempts, str(exc))
         return
 
-   if resp.status_code in (200, 202):
+    if resp.status_code in (200, 202):
         body = resp.json()
         dm_id = body.get("dm_id")
         remote_status = body.get("status")
 
         if remote_status == "delivered":
-            # Simulator sometimes resolves the DM instantly and reports
-            # delivered on the initial call, instead of the documented
-            # 202/queued-then-poll flow. Handle it as an immediate success.
             await db.dm_jobs.update_one(
                 {"_id": job["_id"]},
                 {"$set": {"status": "delivered", "dm_id": dm_id, "attempts": attempts + 1, "updated_at": now}},
             )
             return
 
-        # Otherwise: accepted but not yet delivered -- reconcile later.
         await db.dm_jobs.update_one(
             {"_id": job["_id"]},
             {
@@ -141,7 +133,6 @@ async def _process_send(db: AsyncIOMotorDatabase, job: dict, client: PseudoGramC
         )
         return
 
-    # 500 or anything else unexpected -> retryable
     print(f"DEBUG dm_send_failed status={resp.status_code} body={resp.text[:300]}")
     await _retry_or_fail(db, job, attempts, f"http_{resp.status_code}")
 
