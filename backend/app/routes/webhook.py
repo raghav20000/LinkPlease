@@ -27,7 +27,7 @@ async def receive_webhook(request: Request, response: Response):
         from app.services.signature import compute_signature
         expected = compute_signature(raw_body, settings.pseudogram_api_key)
         if header_value != expected:
-            print(f"WARNING: signature mismatch (not blocking) — investigate before final submission")
+            
 
     try:
         payload = json.loads(raw_body)
