@@ -1,0 +1,15 @@
+# backend
+__pycache__/
+*.pyc
+.env
+backend/.env
+.pytest_cache/
+*.egg-info/
+
+# frontend
+node_modules/
+dist/
+frontend/.env
+
+# misc
+.DS_Store

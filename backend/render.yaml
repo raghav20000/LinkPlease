@@ -1,0 +1,27 @@
+# Reference config for a Render Web Service. You can also just fill
+# these values into the Render dashboard by hand -- this file is not
+# required by Render, it's documentation-as-code.
+services:
+  - type: web
+    name: linkplease-backend
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB_NAME
+        value: linkplease
+      - key: PSEUDOGRAM_BASE_URL
+        value: https://pseudogram-api.onrender.com
+      - key: PSEUDOGRAM_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: DM_MAX_ATTEMPTS
+        value: "6"
+      - key: DM_WORKER_POLL_SECONDS
+        value: "1"
+      - key: PSEUDOGRAM_RATE_LIMIT_PER_MINUTE
+        value: "10"
