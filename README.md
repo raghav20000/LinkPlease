@@ -12,12 +12,9 @@ rate-limits, and lies about delivery.
 > left open.
 
 ## 1. Architecture
-
-```
 User → Vercel (React/Vite) → Render (FastAPI) → MongoDB Atlas
-                                     ↓        ↑
-                              PseudoGram API (webhook + DM send/status)
-```
+↓ ↑
+PseudoGram API (webhook + DM send/status)
 
 - **`POST /webhook`** validates the event, deduplicates it, matches
   rules, and writes a `dm_jobs` document — then returns. It never calls
@@ -30,8 +27,8 @@ User → Vercel (React/Vite) → Render (FastAPI) → MongoDB Atlas
   terminal state.
 - **MongoDB** is the single source of truth for everything — rules,
   seen event IDs, job status, retry counts, duplicate log. Nothing
-  important lives only in process memory (see FAILURES.md #2–3 for the
-  two things that *do*, and why).
+  important lives only in process memory (see FAILURES.md for the two
+  things that do, and why).
 
 ## 2. MongoDB schema
 
@@ -87,6 +84,10 @@ Backend (`backend/.env`, see `.env.example`):
 Frontend (`frontend/.env`): `VITE_API_BASE_URL` — the deployed Render URL.
 The PseudoGram key is **never** referenced anywhere in `frontend/`.
 
+**Important:** paste raw values into Render/Vercel's environment variable
+fields — no surrounding quotes, no trailing whitespace. Either will break
+signature/key comparisons silently.
+
 ## 6. Testing
 
 ```bash
@@ -104,7 +105,7 @@ substring matching, multi-rule matching, duplicate `event_id`, duplicate
 (valid/invalid/missing), `/stats` accuracy, and worker behavior on
 `202`/`429`/`400`/`500`/reconciliation/comment-deleted-before-send.
 
-## 7. Getting your PseudoGram API key (you run these, not me)
+## 7. Getting your PseudoGram API key
 
 ```bash
 curl -X POST https://pseudogram-api.onrender.com/v1/apply \
@@ -118,6 +119,7 @@ curl -X POST https://pseudogram-api.onrender.com/v1/keygen \
 
 Put the returned `api_key` into `backend/.env` as `PSEUDOGRAM_API_KEY`
 (and into Render's environment variables for the deployed version).
+`/apply` must succeed before `/keygen` will work for that email.
 
 ## 8. Deploying the backend to Render
 
@@ -125,27 +127,26 @@ Put the returned `api_key` into `backend/.env` as `PSEUDOGRAM_API_KEY`
 2. New Web Service on Render → connect the repo, root directory `backend/`.
 3. Build command: `pip install -r requirements.txt`
 4. Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-5. Set the env vars from section 5 (real `MONGODB_URI`, real `PSEUDOGRAM_API_KEY`, `ALLOWED_ORIGINS` including your eventual Vercel URL).
-6. Deploy, then verify the three exact routes yourself:
-   ```bash
+5. Set the env vars from section 5 (real `MONGODB_URI`, real `PSEUDOGRAM_API_KEY`, `ALLOWED_ORIGINS` including your Vercel URL).
+6. Deploy, then verify the three exact routes:
+```bash
    curl https://YOUR-RENDER-URL/stats
    curl -X POST https://YOUR-RENDER-URL/rules -H "Content-Type: application/json" \
      -d '{"keyword":"PRICE","dm_message":"test"}'
-   ```
-   I have not deployed this myself — I don't have Render/Atlas/PseudoGram
-   credentials of yours to do so. Run these checks before you submit.
+```
 
 ## 9. Deploying the frontend to Vercel
 
-1. New Project on Vercel → root directory `frontend/`.
+1. New Project on Vercel → root directory `frontend`.
 2. Build command: `npm run build`. Output directory: `dist`.
 3. Environment variable: `VITE_API_BASE_URL=https://YOUR-RENDER-URL`.
-4. Deploy, then add the resulting Vercel URL to the backend's
-   `ALLOWED_ORIGINS` on Render and redeploy the backend.
+4. Deploy — env vars are baked in at build time, so if you add/change one
+   after the first deploy, trigger a fresh Redeploy (not from build cache)
+   for it to take effect.
+5. Add the resulting Vercel URL to the backend's `ALLOWED_ORIGINS` on
+   Render and redeploy the backend.
 
 ## 10. Testing against the real PseudoGram simulator
-
-Once deployed:
 
 ```bash
 # 1. Create at least one rule against your deployed backend
@@ -154,20 +155,20 @@ curl -X POST https://YOUR-RENDER-URL/rules -H "Content-Type: application/json" \
 
 # 2. Fire the load simulator at your webhook
 curl -X POST https://pseudogram-api.onrender.com/v1/simulate/start \
-  -H "X-API-Key: $PSEUDOGRAM_API_KEY" -H "Content-Type: application/json" \
+  -H "X-API-Key: $PGKEY" -H "Content-Type: application/json" \
   -d '{"webhook_url":"https://YOUR-RENDER-URL/webhook","count":500,"duration_seconds":10}'
 # -> returns {"run_id": "..."}
 
-# 3. Give the worker a little time to drain the queue, then compare
-curl -H "X-API-Key: $PSEUDOGRAM_API_KEY" \
-  https://pseudogram-api.onrender.com/v1/simulate/RUN_ID/truth > truth.json
+# 3. Give the worker a couple minutes to drain the queue, then compare
+curl -H "X-API-Key: $PGKEY" \
+  https://pseudogram-api.onrender.com/v1/simulate/RUN_ID/truth
 
-curl https://YOUR-RENDER-URL/stats > mine.json
-diff <(python -m json.tool truth.json) <(python -m json.tool mine.json)
+curl https://YOUR-RENDER-URL/stats
 ```
 
-Do this before submitting — I could not run it myself without your
-real API key and a live deployment.
+For a clean comparison, drop the `dm_jobs`, `events`, `comments`, and
+`duplicates_log` collections in Atlas (leave `rules`) before each fresh
+run — otherwise prior runs' duplicate-detection will mix into the numbers.
 
 ## 11. Duplicate prevention (the load-bearing part)
 
@@ -187,8 +188,11 @@ Two different duplicate problems, two different unique indexes:
 
 ## 12. Retry strategy
 
-- `202` → job moves to `in_flight`, reconciled later via `GET /v1/dm/{dm_id}`.
-- `429` → requeued at `now + Retry-After`, uncapped by the attempt limit's backoff formula (we trust their number).
+- `202`/`200` accepted → if immediately `"delivered"`, marked `sent`
+  right away; otherwise moves to `in_flight`, reconciled later via
+  `GET /v1/dm/{dm_id}` (see FAILURES.md #2 for why both response shapes
+  are handled).
+- `429` → requeued at `now + Retry-After`.
 - `500` / network error → exponential backoff with jitter (`min(60, 2^attempts)` + up to 25% jitter), capped at `DM_MAX_ATTEMPTS`, then `failed`.
 - `400` → immediately `failed`, no retry (the README is explicit this won't help).
 - `send_dm` always includes a stable `Idempotency-Key` derived from the job's own Mongo `_id`, so retrying a send after a crash or timeout reuses the same key — PseudoGram returns the original `dm_id` instead of creating a second DM.
@@ -203,13 +207,18 @@ before any of that happens.
 
 ## 14. Known limitations
 
-See `FAILURES.md` — it's the canonical, honest list. The short version:
-in-memory rate limiter and worker loop assume a single backend
-instance; there's no sweep for jobs orphaned by a crash mid-send; the
-`comment.deleted` policy is a judgment call, not a spec.
+See `FAILURES.md` for the full, honest list. Two are worth calling out
+directly: Part B's signature check is implemented and independently
+verified as correct in isolation, but is currently running in log-only
+(non-blocking) mode due to an unresolved discrepancy between the issued
+API key and the signature PseudoGram's simulator actually sends — see
+FAILURES.md #1. Separately, `POST /v1/dm/send` was observed returning
+`200/"delivered"` immediately rather than the documented `202/"queued"`
+— see FAILURES.md #2; the worker handles both shapes. A ~10-11%
+recipient gap under load, not fully root-caused before the deadline, is
+documented in FAILURES.md #8.
 
 ## 15. Deployed links
 
-_Not filled in — I did not deploy this. Fill in after you deploy:_
-- Backend: `https://___.onrender.com`
-- Frontend: `https://___.vercel.app`
+- Backend: https://linkplease-ifjr.onrender.com
+- Frontend: https://link-please.vercel.app
