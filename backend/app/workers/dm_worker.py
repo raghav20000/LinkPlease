@@ -88,14 +88,28 @@ async def _process_send(db: AsyncIOMotorDatabase, job: dict, client: PseudoGramC
         await _retry_or_fail(db, job, attempts, str(exc))
         return
 
-    if resp.status_code == 202:
+   if resp.status_code in (200, 202):
         body = resp.json()
+        dm_id = body.get("dm_id")
+        remote_status = body.get("status")
+
+        if remote_status == "delivered":
+            # Simulator sometimes resolves the DM instantly and reports
+            # delivered on the initial call, instead of the documented
+            # 202/queued-then-poll flow. Handle it as an immediate success.
+            await db.dm_jobs.update_one(
+                {"_id": job["_id"]},
+                {"$set": {"status": "delivered", "dm_id": dm_id, "attempts": attempts + 1, "updated_at": now}},
+            )
+            return
+
+        # Otherwise: accepted but not yet delivered -- reconcile later.
         await db.dm_jobs.update_one(
             {"_id": job["_id"]},
             {
                 "$set": {
                     "status": "in_flight",
-                    "dm_id": body["dm_id"],
+                    "dm_id": dm_id,
                     "attempts": attempts + 1,
                     "last_checked_at": now,
                     "updated_at": now,
