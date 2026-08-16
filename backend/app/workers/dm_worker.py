@@ -84,6 +84,7 @@ async def _process_send(db: AsyncIOMotorDatabase, job: dict, client: PseudoGramC
             idempotency_key=idempotency_key,
         )
     except Exception as exc:  # network error, timeout, etc -- treat as retryable
+        print(f"DEBUG dm_send_exception={exc}")
         await _retry_or_fail(db, job, attempts, str(exc))
         return
 
@@ -127,8 +128,8 @@ async def _process_send(db: AsyncIOMotorDatabase, job: dict, client: PseudoGramC
         return
 
     # 500 or anything else unexpected -> retryable
+    print(f"DEBUG dm_send_failed status={resp.status_code} body={resp.text[:300]}")
     await _retry_or_fail(db, job, attempts, f"http_{resp.status_code}")
-
 
 async def _retry_or_fail(db: AsyncIOMotorDatabase, job: dict, attempts: int, error: str) -> None:
     settings = get_settings()
